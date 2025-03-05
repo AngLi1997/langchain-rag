@@ -32,20 +32,19 @@ def chatbot(state: State):
         yield {"messages": res}
 
 
-graph_builder = StateGraph(State)
+workflow = StateGraph(State)
 
-graph_builder.add_node("chatbot", chatbot)
-graph_builder.add_node("tools", ToolNode(tools=tools))
-graph_builder.add_conditional_edges("chatbot", tools_condition)
-graph_builder.add_edge("tools", "chatbot")
+workflow.add_node("chatbot", chatbot)
+workflow.add_node("tools", ToolNode(tools=tools))
+# graph_builder.add_conditional_edges("chatbot", tools_condition)
+workflow.add_edge("tools", "chatbot")
 
-graph_builder.add_edge(START, "chatbot")
-graph_builder.add_edge("chatbot", END)
+workflow.add_edge(START, "tools")
+workflow.add_edge("chatbot", END)
 
-graph = graph_builder.compile()
+graph = workflow.compile()
 
 print(graph.get_graph().draw_ascii())
-
 
 if __name__ == '__main__':
     with gradio.Blocks(title="langgraph-deepseek") as demo:
@@ -65,6 +64,7 @@ if __name__ == '__main__':
                 #     resp = {"role": "assistant", "content": ""}
                 #     history.append(resp)
                 # else:
+                print(chunk.content, end="")
                 resp["content"] += chunk.content
                 yield "", history
         input_box.submit(chat, [input_box, chatbot], [input_box, chatbot])
