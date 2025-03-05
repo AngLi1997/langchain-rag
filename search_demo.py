@@ -16,10 +16,7 @@ os.environ["LANGSMITH_API_KEY"] = "lsv2_pt_7be800c4325b4072bf6fe20355aa1a96_3538
 os.environ["SERPER_API_KEY"] = "165d4285a70a571a0659b3bda8cd61da7c273f18"
 
 search = GoogleSerperAPIWrapper(gl="cn", hl="zh-CN")
-
 deepseek = ChatOllama(model="deepseek-r1:32b", base_url="http://192.168.110.129:11434")
-
-
 memory = MemorySaver()
 
 
@@ -32,30 +29,29 @@ class GraphStateNode(TypedDict):
 
 def search_node(state: GraphStateNode):
     print(f'正在联网搜索: {state["query"]}')
-    results = search.results(state["query"])['organic'][:3]
+    results = search.results(state["query"])['organic'][:5]
     return {"search_results": results}
 
 def deepseek_node(state: GraphStateNode):
-
     print(f'用户问题: {state["query"]}')
-
     if state["search_online"]:
         print(f'联网搜索结果: {state["search_results"]}')
         prompt_online = f"""
-                你是一个智能助手，可以根据用户的问题结合联网搜索结果进行分析和回答
                 请结合联网搜索结果分析和回答用户的问题：
+                联网搜索结果:
+                    {state["search_results"]}
+                用户问题：
+                    {state["query"]}
             """
         print(f'正在结合联网搜索结果DeepSeek: {state["query"]}')
-        state["messages"].append({"role": "system", "content": f'联网搜索结果：{state["search_results"]}'})
-        state["messages"].append({"role": "system", "content": prompt_online})
+        state["messages"].append({"role": "user", "content": prompt_online})
+    else:
+        state["messages"].append({"role": "user", "content": state["query"]})
+    result = deepseek.invoke(state["messages"])
+    state["messages"].append({"role": "assistant", "content": result.content})
+    return {"messages": [], "search_results": []}
 
-    state["messages"].append({"role": "user", "content": state["query"]})
-
-    deepseek.invoke(state["messages"])
-
-    return {"messages": state["messages"]}
-
-def search_online(state: GraphStateNode) -> Literal["search", "deepseek"]:
+def search_online_condition(state: GraphStateNode) -> Literal["search", "deepseek"]:
     if state["search_online"]:
         return "search"
     else:
@@ -67,7 +63,7 @@ workflow.add_node("search", search_node)
 workflow.add_node("deepseek", deepseek_node)
 workflow.add_edge("search", "deepseek")
 workflow.add_edge("deepseek", END)
-workflow.add_conditional_edges(START, search_online)
+workflow.add_conditional_edges(START, search_online_condition)
 
 graph = workflow.compile(checkpointer=memory)
 
