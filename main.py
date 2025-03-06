@@ -1,71 +1,88 @@
-import os
+import re
+from typing import TypedDict, List, Annotated, Literal
 
 import gradio
-from gradio import Textbox
+from gradio import Textbox, Chatbot, Checkbox
 from langchain_community.utilities import GoogleSerperAPIWrapper
-from langchain_core.tools import Tool
 from langchain_ollama import ChatOllama
-from langgraph.constants import START, END
-from langgraph.graph import add_messages, StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
-from typing_extensions import TypedDict, Annotated
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.constants import END, START
+from langgraph.graph import StateGraph, add_messages
+from env import set_default_env
 
-os.environ["LANGSMITH_TRACING"] = "true"
-os.environ["LANGSMITH_ENDPOINT"] = "https://api.smith.langchain.com"
-os.environ["LANGSMITH_PROJECT"] = "liang-lang-smith"
-os.environ["LANGSMITH_API_KEY"] = "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"
-os.environ["SERPER_API_KEY"] = "165d4285a70a571a0659b3bda8cd61da7c273f18"
+set_default_env()
 
-llm = ChatOllama(model="llama3.1:latest", base_url="http://192.168.110.129:11434")
-search = GoogleSerperAPIWrapper()
-tools = [Tool(name="google search", func=search.results, description="google search")]
-llm_with_tools = llm.bind_tools(tools)
+search = GoogleSerperAPIWrapper(gl="cn", hl="zh-CN")
+deepseek = ChatOllama(model="deepseek-r1:32b", base_url="http://192.168.110.129:11434")
+memory = MemorySaver()
 
-class State(TypedDict):
+
+class GraphStateNode(TypedDict):
+    query: str
+    search_results: List[dict]
     messages: Annotated[list, add_messages]
 
 
-def chatbot(state: State):
-    res = ""
-    for chunk in llm_with_tools.stream(state["messages"]):
-        res += chunk.content
-        yield {"messages": res}
+def search_online_condition(state: GraphStateNode) -> Literal["search", "deepseek"]:
+    print(f'联网判断:{state["query"]}')
+    result = deepseek.invoke([
+        {"role": "user", "content": f'''
+            你是一个语义解析模型，你的任务是判断用户问题中包含的信息是否需要联网搜索。
+            重要！只能返回 "search" 或 "deepseek"，不要返回其他内容。
+            如果用户问题中包含的信息需要联网搜索，请返回 "search"，否则返回 "deepseek"。
+            用户问题：
+                {state["query"]}
+        '''}
+    ])
+    result = re.sub(r'<think>.*?</think>', '', result.content, flags=re.DOTALL).strip()
+    print(f'判断结果：{result}')
+    if result == "search":
+        return "search"
+    else:
+        return "deepseek"
 
 
-workflow = StateGraph(State)
+def search_online(state: GraphStateNode):
+    print(f'正在联网搜索: {state["query"]}')
+    results = search.results(state["query"])['organic'][:5]
+    return {"search_results": results}
 
-workflow.add_node("chatbot", chatbot)
-workflow.add_node("tools", ToolNode(tools=tools))
-# graph_builder.add_conditional_edges("chatbot", tools_condition)
-workflow.add_edge("tools", "chatbot")
 
-workflow.add_edge(START, "tools")
-workflow.add_edge("chatbot", END)
+def deepseek_node(state: GraphStateNode):
+    if state.get("search_results", []):
+        print(f'正在结合联网搜索结果deepseek:{state["query"]}')
+        state["messages"].append({"role": "user", "content": f'''
+            联网搜索结果：
+            {state["search_results"]}
+            请结合联网搜索结果进行回答问题：
+            {state["query"]}
+        '''
+        })
+    else:
+        print(f'正在deepseek:{state["query"]}')
+        state["messages"].append({"role": "user", "content": f'''
+            请不使用联网搜索结果回答问题：
+            {state["query"]}
+        '''
+        })
+    result = deepseek.invoke(state["messages"])
+    state["messages"].append({"role": "assistant", "content": result.content})
+    return {"messages": [], "search_results": []}
 
-graph = workflow.compile()
+
+workflow = StateGraph(GraphStateNode)
+
+workflow.add_node("deepseek", deepseek_node)
+workflow.add_node("search", search_online)
+
+workflow.add_conditional_edges("__start__", search_online_condition)
+workflow.add_edge("search", "deepseek")
+workflow.add_edge("deepseek", END)
+graph = workflow.compile(checkpointer=memory)
 
 print(graph.get_graph().draw_ascii())
 
 if __name__ == '__main__':
-    with gradio.Blocks(title="langgraph-deepseek") as demo:
-        chatbot = gradio.Chatbot(type="messages")
-        input_box = Textbox(label="请输入问题", placeholder="Enter text and press enter")
-        def chat(message, history):
-            history.append({"role": "user", "content": message})
-            chunks = graph.stream({"messages": history}, stream_mode="messages")
-            # resp = {}
-            resp = {"role": "assistant", "content": ""}
-            history.append(resp)
-            for chunk, event in chunks:
-                # if chunk.content == "<think>":
-                #     resp = {"role": "assistant", "content": "", "metadata": {"title":"thinking"}}
-                #     history.append(resp)
-                # elif chunk.content == "</think>":
-                #     resp = {"role": "assistant", "content": ""}
-                #     history.append(resp)
-                # else:
-                print(chunk.content, end="")
-                resp["content"] += chunk.content
-                yield "", history
-        input_box.submit(chat, [input_box, chatbot], [input_box, chatbot])
-    demo.launch()
+    for chunk, config in graph.stream({"query": "1+1在什么情况下等于3"}, {"configurable": {"thread_id": "1"}}, stream_mode="messages"):
+        if config["langgraph_node"] == "deepseek":
+            print(chunk.content, end="")
