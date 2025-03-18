@@ -150,7 +150,11 @@ engine = create_engine(DATABASE_URL, echo=True)
 
 if __name__ == '__main__':
     cur = engine.connect()
+    sql = ""
     for table_name in table_list:
         result = cur.execute(statement=text(f'show create table {table_name}'))
         for item in result.tuples().fetchall():
-            print(item[1])
+            sql += f'{str(item[1])}\n\n'
+    with open("sql/create_table.sql", "w") as file:
+        file.write(sql)
+        file.close()
